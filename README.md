@@ -148,6 +148,32 @@ WebSocket 事件：`init` / `msg:new` / `sys` / `presence` / `history:load` / `m
 
 要点：依赖安装用 `npm ci`（以 `package-lock.json` 为准），镜像构建用 GitHub Actions 缓存（`type=gha`）加速，ARM 架构通过 QEMU 模拟构建。
 
+## 镜像体积
+
+`docker images` 显示的是**解压后**大小， registry（GHCR）上显示的是**压缩后**大小，两者差 2~3 倍。
+
+| 方案 | 解压后 | 构成 |
+| --- | --- | --- |
+| `Dockerfile.full`（Node 官方镜像） | ~166 MB | base 159.5 MB（node 运行时层 146 MB，含 npm / corepack / 头文件）+ 应用 7 MB |
+| `Dockerfile`（默认，Alpine 官方 nodejs 包） | ~55 MB | alpine 8 MB + nodejs 及依赖 42 MB + 应用 7 MB |
+
+精简做法：
+
+1. **多阶段构建** —— 构建期用 `node:22-alpine` 跑 `npm ci`，运行期换 `alpine:3.22` + `apk add nodejs`（18.5 MB）。运行时不需要 npm / corepack / C++ 头文件，这些占了官方镜像的大头。
+2. **清理依赖** —— 删除 `node_modules` 里的 `@types`、`*.d.ts`、`*.md`、`LICENSE`、`*.map`（约 4 MB）。
+3. `icu-data-full` + `tzdata`（12 MB）是为了中文和 `Asia/Shanghai` 时区正确；若只要英文/UTC，换成 `icu-data-en` 并去掉 `tzdata` 可再省 12 MB。
+
+> 注意：在 Dockerfile 里 `rm -rf` 基础镜像自带的文件**不会**让镜像变小——overlayfs 只是加了 whiteout，底层数据还在。要变小必须在最终阶段里不包含它们（即换基础镜像 / 多阶段复制），这也是上面方案 1 的原因。
+
+想排查体积分布：
+
+```bash
+docker history localim:1.0.0          # 看每层大小
+dive localim:1.0.0                    # 交互式查看（需装 dive）
+```
+
+如果精简版在你环境有问题，用 `docker build -f Dockerfile.full -t localim:full .` 回退到官方镜像版本。
+
 ## 测试
 
 ```bash

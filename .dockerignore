@@ -7,6 +7,7 @@ scripts
 .gitignore
 .workbuddy-ai
 Dockerfile
+Dockerfile.full
 docker-compose.yml
 README.md
 *.md
