@@ -1,11 +1,11 @@
 name: 构建并发布 Docker 镜像
 
 on:
-  push:
-    branches: [main, master]
-    tags: ["v*.*.*"]
-  pull_request:
-    branches: [main, master]
+  # push:
+  #   branches: [main, master]
+  #   tags: ["v*.*.*"]
+  # pull_request:
+  #   branches: [main, master]
   workflow_dispatch:
     inputs:
       platforms:
