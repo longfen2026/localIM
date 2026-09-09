@@ -1,18 +1,20 @@
 FROM node:22-alpine
 
 # 数据目录映射到宿主机后，容器内的写入用户最好与宿主机一致。
-# 默认以 node 用户（uid 1000）运行，可用 PUID/PGID 覆盖，避免宿主机出现 root 属主文件。
+# 默认 uid/gid 1000（即官方镜像自带的 node 用户），可用 --build-arg PUID=... PGID=... 覆盖。
 ARG PUID=1000
 ARG PGID=1000
 
-RUN apk add --no-cache shadow \
- && (getent group ${PGID} || addgroup -g ${PGID} nodeapp) \
- && (getent passwd ${PUID} || adduser -D -H -u ${PUID} -G $(getent group ${PGID} | cut -d: -f1) nodeapp)
+# 让容器内运行用户的 uid/gid 与宿主机保持一致，避免映射出来的数据目录出现 root 属主文件
+RUN GRP=$(awk -F: -v g="${PGID}" '$3==g{print $1}' /etc/group) \
+ && [ -n "$GRP" ] || { GRP=localim; addgroup -g "${PGID}" "$GRP"; } \
+ && USR=$(awk -F: -v u="${PUID}" '$3==u{print $1}' /etc/passwd) \
+ && [ -n "$USR" ] || { USR=localim; adduser -D -H -u "${PUID}" -G "$GRP" "$USR"; }
 
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
-RUN npm install --omit=dev --no-audit --no-fund \
+RUN npm ci --omit=dev --no-audit --no-fund \
  && npm cache clean --force
 
 COPY server ./server
@@ -31,6 +33,6 @@ USER ${PUID}:${PGID}
 EXPOSE 3000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "require('http').get('http://127.0.0.1:'+(process.env.PORT||3000)+'/api/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
+  CMD node -e "require('http').get('http://127.0.0.1:'+(process.env.PORT||3000)+'/api/health', r=>process.exit(r.statusCode===200?0:1)).on('error', ()=>process.exit(1))"
 
 CMD ["node", "server/index.js"]

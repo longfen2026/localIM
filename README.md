@@ -38,7 +38,24 @@ docker compose restart      # 重启（数据不丢）
 docker compose down         # 停止并移除容器（./data 仍保留）
 ```
 
-### 方式二：直接 Node 运行
+### 方式二：用 GHCR 上已构建好的镜像
+
+项目自带 GitHub Actions 发布流程（见下文），镜像会推送到 `ghcr.io/<owner>/<repo>`：
+
+```bash
+docker pull ghcr.io/<owner>/<repo>:latest
+
+docker run -d \
+  --name localim \
+  --restart unless-stopped \
+  -p 3000:3000 \
+  -v ./data:/app/data \
+  ghcr.io/<owner>/<repo>:latest
+```
+
+镜像同时提供 `linux/amd64` 与 `linux/arm64`，树莓派等 ARM 设备可直接拉取。
+
+### 方式三：直接 Node 运行
 
 ```bash
 npm install
@@ -103,6 +120,33 @@ localIM/
 | POST | `/api/upload` | `multipart` 上传图片，返回 `fileId` |
 
 WebSocket 事件：`init` / `msg:new` / `sys` / `presence` / `history:load` / `msg:send`。
+
+## 自动发布（GitHub Actions）
+
+工作流：`.github/workflows/docker-publish.yml`
+
+| 触发条件 | 行为 |
+| --- | --- |
+| push 到 `main` / `master` | 跑测试 → 构建 amd64 + arm64 → 推送 `latest` 与分支标签 |
+| push tag `v1.2.3` | 额外推送 `v1.2.3`、`1.2` |
+| Pull Request | 只构建 amd64 验证，**不推送** |
+| 手动触发 (`workflow_dispatch`) | 可指定平台、可关闭推送 |
+
+产物推送到 **GitHub Container Registry**：`ghcr.io/<owner>/<repo>`。
+
+使用前提：
+
+1. 仓库 **Settings → Actions → General → Workflow permissions** 选 *Read and write permissions*（工作流已声明 `packages: write`，用的是内置 `GITHUB_TOKEN`，无需额外配置密钥）。
+2. 发版打标签即可：
+
+   ```bash
+   git tag v1.0.0
+   git push origin v1.0.0
+   ```
+
+3. 镜像默认**私有**，需要在仓库的 Packages 页面改为 Public，或让拉取方用 `docker login ghcr.io` 登录。
+
+要点：依赖安装用 `npm ci`（以 `package-lock.json` 为准），镜像构建用 GitHub Actions 缓存（`type=gha`）加速，ARM 架构通过 QEMU 模拟构建。
 
 ## 测试
 
