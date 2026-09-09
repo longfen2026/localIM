@@ -1,0 +1,26 @@
+{
+  "name": "localim",
+  "version": "1.0.0",
+  "private": true,
+  "description": "局域网聊天室：免密登录（主机名）、文字与图片收发、服务端长期保存历史消息、Docker 部署 + 数据卷持久化",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "test": "node scripts/smoke-test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "cookie": "^0.6.0",
+    "cookie-parser": "^1.4.7",
+    "cookie-signature": "^1.2.2",
+    "express": "^4.21.2",
+    "multer": "^2.0.2",
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.8.1"
+  }
+}

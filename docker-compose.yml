@@ -1,0 +1,22 @@
+services:
+  localim:
+    build: .
+    image: localim:1.0.0
+    container_name: localim
+    restart: unless-stopped
+    ports:
+      # 宿主机端口:容器端口，局域网内通过 http://<宿主机IP>:3000 访问
+      - "3000:3000"
+    environment:
+      TZ: Asia/Shanghai
+      PORT: 3000
+      DATA_DIR: /app/data
+      MAX_UPLOAD_MB: "10"     # 单张图片上限（MB）
+      HISTORY_PAGE: "50"      # 进入聊天室时下发的历史条数
+      # PUID / PGID 可在启动时覆盖，保持与宿主机用户一致
+      # PUID: "1000"
+      # PGID: "1000"
+    volumes:
+      # 关键：数据卷映射，容器重建/升级数据不丢
+      # Linux/Mac 建议映射到项目下的 ./data；Windows Docker Desktop 同样可用
+      - ./data:/app/data

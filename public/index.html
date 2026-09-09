@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="light">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#f6f7f9" />
+  <title>localIM · 局域网聊天室</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%234f7cff'/%3E%3Cpath d='M8 11h16M8 16h11M8 21h7' stroke='white' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <!-- 登录视图 -->
+  <section class="login" id="loginView">
+    <div class="login-card">
+      <div class="logo">
+        <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"/><path d="M8 11h16M8 16h11M8 21h7" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/></svg>
+      </div>
+      <h1>进入聊天室</h1>
+      <p class="sub">局域网内无需账号密码，填个名字就能聊</p>
+      <form id="loginForm" autocomplete="off">
+        <label for="nameInput">主机名 / 昵称</label>
+        <input id="nameInput" type="text" maxlength="24" placeholder="例如：会议室-PC01" spellcheck="false" />
+        <p class="err" id="loginErr"></p>
+        <button class="btn primary" type="submit" id="loginBtn">进 入</button>
+      </form>
+      <p class="tip">这个名字就是你在聊天室里显示的名字，之后可以随时修改。</p>
+    </div>
+  </section>
+
+  <!-- 聊天视图 -->
+  <section class="chat hidden" id="chatView">
+    <header class="topbar">
+      <div class="room">
+        <div class="room-avatar">
+          <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"/><path d="M8 11h16M8 16h11M8 21h7" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/></svg>
+        </div>
+        <div class="room-meta">
+          <div class="room-name">局域网聊天室</div>
+          <div class="room-sub"><span class="dot"></span><span id="onlineCount">0</span> 人在线</div>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <button class="icon-btn" id="membersBtn" title="在线成员">
+          <svg viewBox="0 0 24 24"><path d="M16 11c1.66 0 3-1.34 3-3s-1.34-3-3-3-3 1.34-3 3 1.34 3 3 3zm-8 0c1.66 0 3-1.34 3-3S9.66 5 8 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5C15 14.17 10.33 13 8 13zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 2.02 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z"/></svg>
+        </button>
+        <button class="icon-btn" id="themeBtn" title="切换主题">
+          <svg viewBox="0 0 24 24" id="themeIcon"><path d="M12 3a9 9 0 1 0 9 9 7 7 0 0 1-9-9z"/></svg>
+        </button>
+        <button class="me-chip" id="meChip" title="点击改名">
+          <span class="me-avatar" id="meAvatar">?</span>
+          <span class="me-name" id="meName">我</span>
+        </button>
+        <button class="icon-btn" id="logoutBtn" title="退出登录">
+          <svg viewBox="0 0 24 24"><path d="M17 8l-1.4 1.4 1.6 1.6H9v2h8.2l-1.6 1.6L17 16l4-4zM5 5h7V3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h7v-2H5z"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <aside class="members hidden" id="membersPanel">
+      <div class="members-head">在线成员 <button class="close" id="membersClose">×</button></div>
+      <ul id="membersList"></ul>
+    </aside>
+
+    <main class="msgs" id="msgs" tabindex="0">
+      <div class="msgs-inner" id="msgsInner">
+        <div class="load-more" id="loadMore"><button class="btn ghost" id="loadMoreBtn">查看更早的消息</button></div>
+        <div id="msgList"></div>
+      </div>
+      <button class="jump-latest hidden" id="jumpLatest">↓ 新消息</button>
+    </main>
+
+    <div class="drop-hint" id="dropHint">松开即可发送图片</div>
+
+    <footer class="composer">
+      <div class="preview hidden" id="preview">
+        <img id="previewImg" alt="待发送图片" />
+        <div class="preview-meta"><span id="previewName"></span><button class="preview-del" id="previewDel" title="移除">×</button></div>
+      </div>
+      <div class="composer-row">
+        <button class="icon-btn" id="imageBtn" title="发送图片">
+          <svg viewBox="0 0 24 24"><path d="M21 19V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5z"/></svg>
+        </button>
+        <button class="icon-btn" id="emojiBtn" title="表情">
+          <svg viewBox="0 0 24 24"><path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm0 18a8 8 0 1 1 0-16 8 8 0 0 1 0 16zm3.5-9a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm-7 0a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0zm3.5 6.5c2.03 0 3.8-1.11 4.74-2.75H7.26A5.48 5.48 0 0 0 12 17.5z"/></svg>
+        </button>
+        <div class="emoji-pop hidden" id="emojiPop"></div>
+        <textarea id="input" rows="1" placeholder="输入消息，Enter 发送 / Shift+Enter 换行，可直接粘贴图片"></textarea>
+        <button class="btn send" id="sendBtn">发送</button>
+      </div>
+      <input type="file" id="fileInput" accept="image/png,image/jpeg,image/gif,image/webp,image/bmp" hidden />
+    </footer>
+  </section>
+
+  <div class="lightbox hidden" id="lightbox"><img id="lightboxImg" alt="图片预览" /></div>
+  <div class="toast hidden" id="toast"></div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
