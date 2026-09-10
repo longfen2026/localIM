@@ -16,14 +16,15 @@
         <svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="8" fill="currentColor"/><path d="M8 11h16M8 16h11M8 21h7" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/></svg>
       </div>
       <h1>进入聊天室</h1>
-      <p class="sub">局域网内无需账号密码，填个名字就能聊</p>
+      <p class="sub">局域网内无需账号密码，用户名已按你的内网地址生成</p>
       <form id="loginForm" autocomplete="off">
-        <label for="nameInput">主机名 / 昵称</label>
-        <input id="nameInput" type="text" maxlength="24" placeholder="例如：会议室-PC01" spellcheck="false" />
+        <label for="nameInput">用户名</label>
+        <input id="nameInput" type="text" maxlength="24" placeholder="ID102" spellcheck="false" />
+        <p class="ip-hint" id="ipHint"></p>
         <p class="err" id="loginErr"></p>
         <button class="btn primary" type="submit" id="loginBtn">进 入</button>
       </form>
-      <p class="tip">这个名字就是你在聊天室里显示的名字，之后可以随时修改。</p>
+      <p class="tip" id="loginTip">名字取内网地址的主机号（192.168.5.102 → ID102），可以改成你喜欢的，进入后点右上角自己的名字也能改。</p>
     </div>
   </section>
 

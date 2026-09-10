@@ -26,6 +26,12 @@ module.exports = {
   MAX_NAME_LEN: 24,
   MAX_TEXT_LEN: 4000,
 
+  // 自动派生用户名的前缀：192.168.5.102 → ID102
+  NAME_PREFIX: process.env.NAME_PREFIX || 'ID',
+  // 是否信任反向代理的 X-Forwarded-For。默认只信任本机/私有网段的代理，
+  // 避免局域网内随便伪造一个 XFF 就冒用别人的身份；若前面是公网反代，设为 "true"。
+  TRUST_PROXY: process.env.TRUST_PROXY || 'loopback,linklocal,uniquelocal',
+
   // 频率限制：每 N 毫秒最多 M 条消息
   RATE_WINDOW_MS: 5000,
   RATE_MAX_MSG: 15,

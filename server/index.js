@@ -11,11 +11,13 @@ const cookieParser = require('cookie-parser');
 const cookie = require('cookie');
 const signature = require('cookie-signature');
 const multer = require('multer');
+const proxyAddr = require('proxy-addr');
 const { Server } = require('socket.io');
 
 const config = require('./config');
 const Store = require('./store');
 const { imageSize, EXT_BY_MIME, ALLOWED_MIME } = require('./media');
+const { deriveName, isAutoName } = require('./identity');
 
 const store = new Store(config.DATA_DIR);
 
@@ -52,6 +54,25 @@ function rateLimiter(limit, windowMs) {
 
 const allowMessage = rateLimiter(config.RATE_MAX_MSG, config.RATE_WINDOW_MS);
 const allowUpload = rateLimiter(config.RATE_MAX_UPLOAD, 60 * 1000);
+
+/* ---------------- 客户端 IP ---------------- */
+
+// 统一 HTTP 与 WebSocket 的取 IP 逻辑：Socket.IO 的 handshake.address 不认
+// X-Forwarded-For，在反代后面会拿到代理自己的地址，这里手动按同样的规则解析。
+const TRUST_PROXY = (function () {
+  const v = String(config.TRUST_PROXY).trim();
+  if (v === 'true' || v === '1') return () => true;
+  if (v === 'false' || v === '0' || v === '') return () => false;
+  return v.split(',').map((s) => s.trim()).filter(Boolean);
+})();
+
+function clientIp(req) {
+  try {
+    return proxyAddr(req, TRUST_PROXY) || '';
+  } catch (_) {
+    return (req && req.socket && req.socket.remoteAddress) || '';
+  }
+}
 
 /* ---------------- 图片上传 ---------------- */
 
@@ -99,7 +120,8 @@ async function main() {
   });
 
   app.disable('x-powered-by');
-  app.set('trust proxy', true);
+  // 只信任来自本机/内网代理的 X-Forwarded-For，防止局域网内伪造 IP 冒用身份
+  app.set('trust proxy', TRUST_PROXY);
   app.use(express.json({ limit: '256kb' }));
   app.use(cookieParser(store.secret));
 
@@ -132,15 +154,25 @@ async function main() {
 
   // 当前登录状态（浏览器打开页面时先调它，用于自动登录）
   app.get('/api/me', (req, res) => {
-    if (!req.user) return res.json({ user: null });
+    const ip = clientIp(req);
+    if (!req.user) {
+      // 未登录：把按 IP 派生好的名字一起返回，前端直接预填
+      return res.json({ user: null, ip, suggestedName: deriveName(ip, takenNamesExcept(null)) });
+    }
     store.touchUser(req.user.id);
-    res.json({ user: { id: req.user.id, name: req.user.name } });
+    const user = syncAutoName(req.user, ip);
+    res.json({
+      user: { id: user.id, name: user.name },
+      ip,
+      suggestedName: deriveName(ip, takenNamesExcept(user.id)),
+    });
   });
 
-  // 登录 / 改名：只需主机名，无需密码
+  // 登录 / 改名：名字留空则按内网 IP 自动派生（192.168.5.102 → ID102）
   app.post('/api/login', (req, res) => {
-    const name = cleanName((req.body && req.body.name) || '');
-    if (!name) return res.status(400).json({ error: '请输入主机名' });
+    const raw = cleanName((req.body && req.body.name) || '');
+    const name = raw || deriveName(clientIp(req), takenNamesExcept((req.user && req.user.id) || null));
+    if (!name) return res.status(400).json({ error: '请输入用户名' });
     const id = (req.user && req.user.id) || crypto.randomBytes(12).toString('hex');
     const user = store.upsertUser(id, name);
     setAuthCookies(res, user);
@@ -220,6 +252,31 @@ async function main() {
 
   const online = new Map(); // socketId -> {id, name}
 
+  /** 当前在线用户已占用的名字（排除自己），用于自动命名时避让 */
+  function takenNamesExcept(userId) {
+    const s = new Set();
+    for (const u of online.values()) {
+      if (u.id !== userId) s.add(u.name);
+    }
+    return s;
+  }
+
+  /**
+   * 名字是自动派生（ID102 这种）的用户，IP 变了就跟着更新；
+   * 手动改过名字的用户不会被覆盖。
+   */
+  function syncAutoName(user, ip) {
+    if (!isAutoName(user.name)) return user;
+    const want = deriveName(ip, takenNamesExcept(user.id));
+    if (want === user.name) return user;
+    store.upsertUser(user.id, want);
+    for (const [sid, u] of online) {
+      if (u.id === user.id) online.set(sid, { id: user.id, name: want });
+    }
+    broadcastPresence();
+    return { id: user.id, name: want };
+  }
+
   function presenceList() {
     const map = new Map();
     for (const u of online.values()) map.set(u.id, u.name);
@@ -239,11 +296,14 @@ async function main() {
     const user = store.getUser(uid);
     if (!user) return next(new Error('UNAUTHORIZED'));
     socket.data.user = { id: user.id, name: user.name };
+    socket.data.ip = clientIp(socket.request);
     next();
   });
 
   io.on('connection', (socket) => {
-    const user = socket.data.user;
+    // 进入聊天室时按当前 IP 校准自动派生的名字（手动改过的不动）
+    let user = syncAutoName(socket.data.user, socket.data.ip);
+    socket.data.user = user;
     online.set(socket.id, user);
     store.upsertUser(user.id, user.name);
 

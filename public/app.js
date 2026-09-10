@@ -6,7 +6,7 @@
 
   const el = {
     loginView: $('loginView'), chatView: $('chatView'),
-    loginForm: $('loginForm'), nameInput: $('nameInput'), loginErr: $('loginErr'), loginBtn: $('loginBtn'),
+    loginForm: $('loginForm'), nameInput: $('nameInput'), loginErr: $('loginErr'), loginBtn: $('loginBtn'), ipHint: $('ipHint'),
     msgs: $('msgs'), msgList: $('msgList'), loadMore: $('loadMore'), loadMoreBtn: $('loadMoreBtn'),
     jumpLatest: $('jumpLatest'),
     input: $('input'), sendBtn: $('sendBtn'), fileInput: $('fileInput'), imageBtn: $('imageBtn'),
@@ -460,6 +460,10 @@
     el.nameInput.focus();
   }
 
+  function setIpHint(ip) {
+    el.ipHint.textContent = ip ? '检测到内网地址 ' + ip + '，已自动生成用户名' : '';
+  }
+
   async function bootstrap() {
     try {
       const data = await api('/api/me');
@@ -470,6 +474,9 @@
         connect();
       } else {
         goLogin();
+        // 服务端按内网 IP 派生好名字，直接预填，用户可改
+        el.nameInput.value = data.suggestedName || '';
+        setIpHint(data.ip);
       }
     } catch (_) {
       toast('无法连接服务器');
@@ -479,8 +486,8 @@
 
   el.loginForm.addEventListener('submit', async (e) => {
     e.preventDefault();
+    // 留空则由服务端按内网 IP 自动派生（192.168.5.102 → ID102）
     const name = el.nameInput.value.trim();
-    if (!name) { el.loginErr.textContent = '请输入主机名'; return; }
     el.loginErr.textContent = '';
     el.loginBtn.disabled = true;
     try {
@@ -500,13 +507,21 @@
     try { await api('/api/logout', { method: 'POST' }); } catch (_) { /* 忽略 */ }
     goLogin();
     el.nameInput.value = '';
+    setIpHint('');
+    try {
+      const d = await api('/api/me');
+      if (!d.user) {
+        el.nameInput.value = d.suggestedName || '';
+        setIpHint(d.ip);
+      }
+    } catch (_) { /* 忽略 */ }
   });
 
   el.meChip.addEventListener('click', async () => {
-    const name = window.prompt('修改显示的名字（主机名）', state.me ? state.me.name : '');
+    const name = window.prompt('修改显示的名字（留空则恢复为按内网地址自动生成的名字）', state.me ? state.me.name : '');
     if (name === null) return;
     const clean = name.trim().slice(0, 24);
-    if (!clean || clean === (state.me && state.me.name)) return;
+    if (clean === (state.me && state.me.name)) return;
     try {
       const data = await api('/api/login', { method: 'POST', body: JSON.stringify({ name: clean }) });
       state.me = data.user;
