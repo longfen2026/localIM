@@ -1,6 +1,6 @@
 {
   "name": "localim",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "private": true,
   "description": "局域网聊天室：免密登录（主机名）、文字与图片收发、文件发送（服务端暂存24小时）、服务端长期保存历史消息、Docker 部署 + 数据卷持久化",
   "main": "server/index.js",
