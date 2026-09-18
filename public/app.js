@@ -10,6 +10,7 @@
     msgs: $('msgs'), msgList: $('msgList'), loadMore: $('loadMore'), loadMoreBtn: $('loadMoreBtn'),
     jumpLatest: $('jumpLatest'),
     input: $('input'), sendBtn: $('sendBtn'), fileInput: $('fileInput'), imageBtn: $('imageBtn'),
+    fileBtn: $('fileBtn'), anyFileInput: $('anyFileInput'),
     emojiBtn: $('emojiBtn'), emojiPop: $('emojiPop'),
     preview: $('preview'), previewImg: $('previewImg'), previewName: $('previewName'), previewDel: $('previewDel'),
     meName: $('meName'), meAvatar: $('meAvatar'), meChip: $('meChip'), logoutBtn: $('logoutBtn'),
@@ -33,7 +34,9 @@
     online: [],
     unread: 0,
     localSeq: 0,
-    maxUploadBytes: 10 * 1024 * 1024,
+    maxUploadBytes: 10 * 1024 * 1024,  // 图片上限（MB→字节），bootstrap 时以服务端下发的 limits 为准
+    maxFileBytes: 200 * 1024 * 1024,   // 文件上限
+    fileTtlHours: 24,                  // 文件有效期（提示用）
   };
 
   let socket = null;
@@ -113,6 +116,20 @@
     if (last < text.length) target.appendChild(document.createTextNode(text.slice(last)));
   }
 
+  function formatSize(bytes) {
+    const n = Number(bytes) || 0;
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1).replace(/\.0$/, '') + ' KB';
+    if (n < 1024 * 1024 * 1024) return (n / 1024 / 1024).toFixed(1).replace(/\.0$/, '') + ' MB';
+    return (n / 1024 / 1024 / 1024).toFixed(2) + ' GB';
+  }
+
+  /** 扩展名 → 文件卡片图标（用首字母区分类型，够轻量） */
+  function fileBadge(name) {
+    const m = /\.([A-Za-z0-9]+)$/.exec(String(name || ''));
+    return (m ? m[1].toUpperCase().slice(0, 3) : 'FILE');
+  }
+
   /* ---------------- 消息渲染 ---------------- */
 
   function makeRow(msg, prev) {
@@ -144,7 +161,7 @@
     }
 
     const bubble = document.createElement('div');
-    bubble.className = 'bubble' + (msg.type === 'image' ? ' img' : '');
+    bubble.className = 'bubble' + (msg.type === 'image' ? ' img' : '') + (msg.type === 'file' ? ' filecard' : '');
 
     if (msg.type === 'image' && msg.image) {
       const img = document.createElement('img');
@@ -163,6 +180,14 @@
         linkify(cap, msg.text);
         bubble.appendChild(cap);
       }
+    } else if (msg.type === 'file' && msg.file) {
+      bubble.appendChild(buildFileCard(msg.file));
+      if (msg.text) {
+        const cap = document.createElement('div');
+        cap.className = 'cap';
+        linkify(cap, msg.text);
+        bubble.appendChild(cap);
+      }
     } else {
       linkify(bubble, msg.text || '');
     }
@@ -170,6 +195,54 @@
     body.appendChild(bubble);
     row.appendChild(body);
     return row;
+  }
+
+  /** 文件消息卡片：图标 + 文件名 + 大小 + 下载；过期则置灰并提示 */
+  function buildFileCard(file) {
+    const expired = Number(file.expiresAt) < Date.now();
+    const card = document.createElement('div');
+    card.className = 'file-card' + (expired ? ' expired' : '');
+
+    const badge = document.createElement('span');
+    badge.className = 'fc-badge';
+    badge.textContent = fileBadge(file.name);
+
+    const info = document.createElement('div');
+    info.className = 'fc-info';
+    const nm = document.createElement('div');
+    nm.className = 'fc-name';
+    nm.textContent = file.name || '未命名文件';
+    nm.title = file.name || '';
+    const meta = document.createElement('div');
+    meta.className = 'fc-meta';
+    meta.textContent = formatSize(file.size) + (expired ? ' · 文件已过期' : ' · ' + state.fileTtlHours + ' 小时内可下载');
+    info.appendChild(nm);
+    info.appendChild(meta);
+
+    card.appendChild(badge);
+    card.appendChild(info);
+
+    if (!expired) {
+      const a = document.createElement('a');
+      a.className = 'fc-dl';
+      a.href = '/api/files/' + encodeURIComponent(file.id || '');
+      a.download = file.name || 'file';
+      a.textContent = '下载';
+      card.appendChild(a);
+
+      // 到期后自动把卡片置灰为"已过期"（无需刷新页面）
+      const delay = Number(file.expiresAt) - Date.now();
+      if (delay > 0 && delay < 30 * 24 * 3600 * 1000) {
+        setTimeout(() => {
+          card.classList.add('expired');
+          meta.textContent = formatSize(file.size) + ' · 文件已过期';
+          const dl2 = card.querySelector('.fc-dl');
+          if (dl2) dl2.remove();
+        }, delay + 1000);
+      }
+    }
+
+    return card;
   }
 
   function daySepEl(ts) {
@@ -284,7 +357,7 @@
   function sendImageFile(file) {
     if (!file) return;
     if (!/^image\/(png|jpeg|gif|webp|bmp)$/.test(file.type)) return toast('只支持 PNG / JPG / GIF / WEBP / BMP 图片');
-    if (file.size > state.maxUploadBytes) return toast('图片超过 10MB，请压缩后再发送');
+    if (Number.isFinite(state.maxUploadBytes) && file.size > state.maxUploadBytes) return toast('图片超过 ' + Math.round(state.maxUploadBytes / 1048576) + 'MB，请压缩后再发送');
 
     const blobUrl = URL.createObjectURL(file);
     const localId = addPending({
@@ -296,7 +369,7 @@
       const p = state.pending.get(localId);
       if (p) p.row.style.opacity = String(0.4 + 0.6 * (percent / 100));
     }).then((fileId) => {
-      doSend({ fileId }, localId, blobUrl);
+      doSend({ fileId, kind: 'image' }, localId, blobUrl);
     }).catch((err) => {
       const p = state.pending.get(localId);
       if (p) { p.row.classList.add('failed'); p.row.style.opacity = '1'; }
@@ -306,17 +379,49 @@
     });
   }
 
+  /** 发送任意文件（非图片）：上传后以文件卡片消息发出 */
+  function sendChatFile(file) {
+    if (!file) return;
+    if (Number.isFinite(state.maxFileBytes) && file.size > state.maxFileBytes) return toast('文件超过 ' + Math.round(state.maxFileBytes / 1048576) + 'MB，无法发送');
+
+    const localId = addPending({
+      id: 'tmp', type: 'file', userId: state.me.id, name: state.me.name, ts: Date.now(),
+      text: '',
+      file: { id: '', name: file.name, size: file.size, mime: file.type, expiresAt: Date.now() + state.fileTtlHours * 3600 * 1000 },
+    });
+
+    uploadFile(file, (percent) => {
+      const p = state.pending.get(localId);
+      if (p) p.row.style.opacity = String(0.4 + 0.6 * (percent / 100));
+    }).then((data) => {
+      doSend({ fileId: data.fileId, kind: 'file' }, localId);
+    }).catch((err) => {
+      const p = state.pending.get(localId);
+      if (p) { p.row.classList.add('failed'); p.row.style.opacity = '1'; }
+      toast(err.message || '文件上传失败');
+      setTimeout(() => removePending(localId), 4000);
+    });
+  }
+
   function uploadImage(file, onProgress) {
+    return uploadFormData('image', file, onProgress);
+  }
+
+  function uploadFile(file, onProgress) {
+    return uploadFormData('file', file, onProgress);
+  }
+
+  function uploadFormData(field, file, onProgress) {
     return new Promise((resolve, reject) => {
       const fd = new FormData();
-      fd.append('image', file);
+      fd.append(field, file);
       const xhr = new XMLHttpRequest();
       xhr.open('POST', '/api/upload');
       xhr.upload.onprogress = (e) => { if (e.lengthComputable && onProgress) onProgress(Math.round((e.loaded / e.total) * 100)); };
       xhr.onload = () => {
         let data = {};
         try { data = JSON.parse(xhr.responseText); } catch (_) { /* 忽略 */ }
-        if (xhr.status >= 200 && xhr.status < 300 && data.fileId) resolve(data.fileId);
+        if (xhr.status >= 200 && xhr.status < 300 && data.fileId) resolve(data);
         else reject(new Error(data.error || '上传失败'));
       };
       xhr.onerror = () => reject(new Error('网络错误'));
@@ -464,9 +569,20 @@
     el.ipHint.textContent = ip ? '检测到内网地址 ' + ip + '，已自动生成用户名' : '';
   }
 
+  /** 服务端下发的上传上限（图片/文件大小、文件有效期），保持两端一致；0 表示不限 */
+  function applyLimits(limits) {
+    if (!limits) return;
+    const im = Number(limits.maxImageMB);
+    const fm = Number(limits.maxFileMB);
+    if (Number.isFinite(im)) state.maxUploadBytes = im > 0 ? im * 1048576 : Infinity;
+    if (Number.isFinite(fm)) state.maxFileBytes = fm > 0 ? fm * 1048576 : Infinity;
+    if (Number.isFinite(Number(limits.fileTtlHours))) state.fileTtlHours = Number(limits.fileTtlHours);
+  }
+
   async function bootstrap() {
     try {
       const data = await api('/api/me');
+      applyLimits(data.limits);
       if (data.user) {
         state.me = data.user;
         applyMe();
@@ -493,6 +609,7 @@
     try {
       const data = await api('/api/login', { method: 'POST', body: JSON.stringify({ name }) });
       state.me = data.user;
+      applyLimits(data.limits);
       applyMe();
       showChat();
       connect();
@@ -549,20 +666,30 @@
     el.fileInput.value = '';
   });
 
-  // 粘贴图片
+  el.fileBtn.addEventListener('click', () => el.anyFileInput.click());
+  el.anyFileInput.addEventListener('change', () => {
+    const f = el.anyFileInput.files && el.anyFileInput.files[0];
+    if (f) sendChatFile(f);
+    el.anyFileInput.value = '';
+  });
+
+  // 粘贴：图片走图片流程，其他文件走文件流程
   el.input.addEventListener('paste', (e) => {
     const items = e.clipboardData && e.clipboardData.items;
     if (!items) return;
     for (const it of items) {
-      if (it.kind === 'file' && /^image\//.test(it.type)) {
+      if (it.kind === 'file') {
+        const f = it.getAsFile();
+        if (!f) continue;
         e.preventDefault();
-        sendImageFile(it.getAsFile());
+        if (/^image\/(png|jpeg|gif|webp|bmp)$/.test(f.type)) sendImageFile(f);
+        else sendChatFile(f);
         return;
       }
     }
   });
 
-  // 拖拽图片
+  // 拖拽：图片走图片流程，其他文件走文件流程
   let dragDepth = 0;
   window.addEventListener('dragenter', (e) => {
     if (!state.me) return;
@@ -581,7 +708,9 @@
     dragDepth = 0;
     el.dropHint.classList.remove('on');
     const f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-    if (f) sendImageFile(f);
+    if (!f) return;
+    if (/^image\/(png|jpeg|gif|webp|bmp)$/.test(f.type)) sendImageFile(f);
+    else sendChatFile(f);
   });
 
   // 表情

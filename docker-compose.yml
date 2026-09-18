@@ -12,6 +12,7 @@ services:
       PORT: 3000
       DATA_DIR: /app/data
       MAX_UPLOAD_MB: "10"     # 单张图片上限（MB）
+      MAX_FILE_MB: "200"      # 单个文件上限（MB），发送的文件 24 小时后过期清理
       HISTORY_PAGE: "50"      # 进入聊天室时下发的历史条数
       # PUID / PGID 可在启动时覆盖，保持与宿主机用户一致
       # PUID: "1000"

@@ -19,7 +19,7 @@ const Store = require('./store');
 const { imageSize, EXT_BY_MIME, ALLOWED_MIME } = require('./media');
 const { deriveName, isAutoName } = require('./identity');
 
-const store = new Store(config.DATA_DIR);
+const store = new Store(config.DATA_DIR, { fileGcMinutes: config.FILE_GC_MINUTES });
 
 /* ---------------- 工具 ---------------- */
 
@@ -74,14 +74,34 @@ function clientIp(req) {
   }
 }
 
-/* ---------------- 图片上传 ---------------- */
+/* ---------------- 图片 / 文件上传 ---------------- */
+
+// 文件有效期（毫秒），从上传时刻起算；同时编码进落盘文件名，供 GC 扫磁盘兜底清理
+const FILE_TTL_MS = Math.max(0, config.FILE_TTL_HOURS) * 3600 * 1000;
+
+/** 从原始文件名提取安全扩展名（不含路径成分，限长），无则 .bin */
+function safeExt(originalname, fallback) {
+  const ext = path.extname(String(originalname || '')).slice(0, 11);
+  return /^[.][A-Za-z0-9_-]*$/.test(ext) ? ext : (fallback || '.bin');
+}
+
+/** 清洗聊天文件名：去控制字符/路径分隔符，保留中文与空格，限长 */
+function cleanFileName(input) {
+  return String(input || '')
+    .replace(/[\u0000-\u001f\u007f]/g, '')
+    .replace(/[\\/:*?"<>|]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^[.\s]+/, '')
+    .slice(0, 120) || '未命名文件';
+}
 
 const storage = multer.diskStorage({
   destination: async (req, file, cb) => {
-    // 按月份分目录，避免单目录文件过多
+    // 按月份分目录，避免单目录文件过多；图片与文件分目录（生命周期不同）
     const d = new Date();
     const sub = path.join(
-      config.UPLOAD_DIR,
+      file.fieldname === 'file' ? config.FILE_DIR : config.UPLOAD_DIR,
       `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}`
     );
     try {
@@ -92,16 +112,34 @@ const storage = multer.diskStorage({
     }
   },
   filename: (req, file, cb) => {
-    const ext = EXT_BY_MIME[file.mimetype] || '.bin';
-    cb(null, `${Date.now()}-${crypto.randomBytes(6).toString('hex')}${ext}`);
+    if (file.fieldname === 'file') {
+      // ${fileId}-${expiresAt}${ext}：过期时间写进文件名，清理时直接扫磁盘
+      const fileId = crypto.randomBytes(12).toString('hex');
+      const expiresAt = Date.now() + FILE_TTL_MS;
+      req.fileMeta = { fileId, expiresAt };
+      cb(null, `${fileId}-${expiresAt}${safeExt(file.originalname)}`);
+    } else {
+      const ext = EXT_BY_MIME[file.mimetype] || '.bin';
+      cb(null, `${Date.now()}-${crypto.randomBytes(6).toString('hex')}${ext}`);
+    }
   },
 });
 
 const upload = multer({
   storage,
-  limits: { fileSize: config.MAX_UPLOAD_MB * 1024 * 1024, files: 1 },
+  // multipart 文件名按 UTF-8 解析（默认 latin1 会把中文文件名变成乱码）
+  defParamCharset: 'utf8',
+  limits: {
+    // multer 的 fileSize 是所有字段共用的粗筛，取两种上限的较大值；
+    // MAX_FILE_MB=0 表示文件不限大小，此时粗筛放行，精确校验在接口里做
+    fileSize: config.MAX_FILE_MB > 0
+      ? Math.max(config.MAX_UPLOAD_MB, config.MAX_FILE_MB) * 1024 * 1024
+      : Infinity,
+    files: 1,
+  },
   fileFilter: (req, file, cb) => {
-    if (ALLOWED_MIME.includes(file.mimetype)) cb(null, true);
+    // 图片字段维持 MIME 白名单；文件字段不限制类型（局域网可信环境），大小由 limits 管
+    if (file.fieldname !== 'image' || ALLOWED_MIME.includes(file.mimetype)) cb(null, true);
     else cb(new Error('UNSUPPORTED_TYPE'));
   },
 });
@@ -155,9 +193,11 @@ async function main() {
   // 当前登录状态（浏览器打开页面时先调它，用于自动登录）
   app.get('/api/me', (req, res) => {
     const ip = clientIp(req);
+    // 把上传上限一起下发，前端校验与服务端保持一致
+    const limits = { maxImageMB: config.MAX_UPLOAD_MB, maxFileMB: config.MAX_FILE_MB, fileTtlHours: config.FILE_TTL_HOURS };
     if (!req.user) {
       // 未登录：把按 IP 派生好的名字一起返回，前端直接预填
-      return res.json({ user: null, ip, suggestedName: deriveName(ip, takenNamesExcept(null)) });
+      return res.json({ user: null, ip, suggestedName: deriveName(ip, takenNamesExcept(null)), limits });
     }
     store.touchUser(req.user.id);
     const user = syncAutoName(req.user, ip);
@@ -165,6 +205,7 @@ async function main() {
       user: { id: user.id, name: user.name },
       ip,
       suggestedName: deriveName(ip, takenNamesExcept(user.id)),
+      limits,
     });
   });
 
@@ -195,38 +236,90 @@ async function main() {
     res.json(store.recent(limit, Number.isFinite(before) ? before : undefined));
   });
 
-  // 图片上传：返回 fileId，随后通过 WebSocket 发送引用
+  // 上传：image 字段为图片（MIME 白名单，长期保存），file 字段为任意文件（暂存，
+  // 有效期 FILE_TTL_HOURS，过期由 GC 清理）。都返回 fileId，随后通过 WebSocket 发送引用。
   app.post('/api/upload', (req, res, next) => {
     if (!req.user) return res.status(401).json({ error: '未登录' });
     next();
-  }, upload.single('image'), async (req, res) => {
-    if (!req.file) return res.status(400).json({ error: '没有收到图片' });
+  }, upload.fields([{ name: 'image', maxCount: 1 }, { name: 'file', maxCount: 1 }]), async (req, res) => {
+    const img = req.files && req.files.image && req.files.image[0];
+    const doc = req.files && req.files.file && req.files.file[0];
+    if (!img && !doc) return res.status(400).json({ error: '没有收到文件' });
+    // multer 的 fileSize 上限是所有字段共用的大值，这里按字段精确校验
+    if (img && img.size > config.MAX_UPLOAD_MB * 1024 * 1024) {
+      fs.unlink(img.path, () => {});
+      return res.status(413).json({ error: `图片超过 ${config.MAX_UPLOAD_MB}MB` });
+    }
+    if (doc && config.MAX_FILE_MB > 0 && doc.size > config.MAX_FILE_MB * 1024 * 1024) {
+      fs.unlink(doc.path, () => {});
+      return res.status(413).json({ error: `文件超过 ${config.MAX_FILE_MB}MB` });
+    }
     if (!allowUpload(req.user.id)) {
-      fs.unlink(req.file.path, () => {});
+      if (img) fs.unlink(img.path, () => {});
+      if (doc) fs.unlink(doc.path, () => {});
       return res.status(429).json({ error: '上传过于频繁，请稍后再试' });
     }
-    try {
-      const head = Buffer.alloc(64);
-      const fh = await fsp.open(req.file.path, 'r');
-      await fh.read(head, 0, 64, 0);
-      await fh.close();
-      const size = imageSize(head);
 
-      const rel = '/' + path.relative(config.UPLOAD_DIR, req.file.path).split(path.sep).join('/');
-      const fileId = crypto.randomBytes(12).toString('hex');
-      store.addPendingUpload(fileId, {
+    try {
+      /* 图片：解析真实宽高（只读文件头），消息里长期引用 */
+      if (img) {
+        const head = Buffer.alloc(64);
+        const fh = await fsp.open(img.path, 'r');
+        await fh.read(head, 0, 64, 0);
+        await fh.close();
+        const size = imageSize(head);
+
+        const rel = '/' + path.relative(config.UPLOAD_DIR, img.path).split(path.sep).join('/');
+        const fileId = crypto.randomBytes(12).toString('hex');
+        store.addPendingUpload(fileId, {
+          userId: req.user.id,
+          url: '/uploads' + rel,
+          w: size ? size.w : null,
+          h: size ? size.h : null,
+          size: img.size,
+          name: cleanName(img.originalname) || 'image',
+        });
+        return res.json({ fileId, kind: 'image' });
+      }
+
+      /* 文件：暂存，过期时间已编码进落盘文件名（req.fileMeta 由 storage 生成） */
+      const meta = req.fileMeta || {};
+      const fileId = meta.fileId || crypto.randomBytes(12).toString('hex');
+      const expiresAt = meta.expiresAt || (Date.now() + FILE_TTL_MS);
+      const rel = path.relative(config.FILE_DIR, doc.path).split(path.sep).join('/');
+      store.addPendingFile(fileId, {
         userId: req.user.id,
-        url: '/uploads' + rel,
-        w: size ? size.w : null,
-        h: size ? size.h : null,
-        size: req.file.size,
-        name: cleanName(req.file.originalname) || 'image',
+        rel,
+        name: cleanFileName(doc.originalname),
+        mime: doc.mimetype || 'application/octet-stream',
+        size: doc.size,
+        expiresAt,
       });
-      res.json({ fileId });
+      res.json({ fileId, kind: 'file', name: cleanFileName(doc.originalname), size: doc.size, expiresAt });
     } catch (e) {
-      fs.unlink(req.file.path, () => {});
+      if (img) fs.unlink(img.path, () => {});
+      if (doc) fs.unlink(doc.path, () => {});
       res.status(500).json({ error: '上传处理失败' });
     }
+  });
+
+  // 文件下载：按 fileId 定位（已发送的在注册表，未发送的在 pending，都能下载）；
+  // 过期或已被清理则 410/404。
+  // 强制 attachment + nosniff，即使上传的是 HTML/SVG 也只会被保存而不会在浏览器渲染。
+  app.get('/api/files/:fileId', (req, res) => {
+    const fileId = String(req.params.fileId || '');
+    if (!/^[0-9a-f]{6,64}$/.test(fileId)) return res.status(400).json({ error: '无效的文件标识' });
+    const entry = store.getFile(fileId) || store.peekPendingFile(fileId);
+    if (!entry) return res.status(404).json({ error: '文件不存在或已被清理' });
+    if (entry.expiresAt < Date.now()) return res.status(410).json({ error: '文件已过期（超过24小时）' });
+    const abs = store.absFile(entry);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.download(abs, entry.name, (err) => {
+      if (err && !res.headersSent) {
+        // 注册表在但磁盘文件没了（如被手动删除）：视同过期
+        res.status(404).json({ error: '文件不存在或已被清理' });
+      }
+    });
   });
 
   app.use('/uploads', express.static(config.UPLOAD_DIR, {
@@ -239,7 +332,10 @@ async function main() {
 
   app.use((err, _req, res, _next) => {
     if (err && err.code === 'LIMIT_FILE_SIZE') {
-      return res.status(413).json({ error: `图片超过 ${config.MAX_UPLOAD_MB}MB` });
+      // 按上传字段区分文案：image 是图片，file 是任意文件
+      const isFile = err.field === 'file';
+      const mb = isFile ? config.MAX_FILE_MB : config.MAX_UPLOAD_MB;
+      return res.status(413).json({ error: `${isFile ? '文件' : '图片'}超过 ${mb}MB` });
     }
     if (err && err.message === 'UNSUPPORTED_TYPE') {
       return res.status(415).json({ error: '仅支持 PNG / JPG / GIF / WEBP / BMP' });
@@ -329,11 +425,11 @@ async function main() {
       if (!allowMessage(user.id)) return done('发送过于频繁，请稍后再试');
 
       const p = payload || {};
+      const text = cleanText(p.text).trim();
       // 图片消息
-      if (p.fileId) {
+      if (p.fileId && p.kind !== 'file') {
         const info = store.takePendingUpload(String(p.fileId), user.id);
         if (!info) return done('图片已失效，请重新上传');
-        const text = cleanText(p.text).trim();
         const msg = store.addMessage({
           type: 'image',
           userId: user.id,
@@ -345,8 +441,28 @@ async function main() {
         return done(null, msg);
       }
 
+      // 文件消息（非图片）：暂存到过期为止
+      if (p.fileId && p.kind === 'file') {
+        const info = store.takePendingFile(String(p.fileId), user.id);
+        if (!info) return done('文件已失效，请重新上传');
+        const msg = store.addMessage({
+          type: 'file',
+          userId: user.id,
+          name: user.name,
+          text,
+          file: {
+            id: String(p.fileId),
+            name: info.name,
+            mime: info.mime,
+            size: info.size,
+            expiresAt: info.expiresAt,
+          },
+        });
+        io.emit('msg:new', msg);
+        return done(null, msg);
+      }
+
       // 文本消息
-      const text = cleanText(p.text).trim();
       if (!text) return done('消息不能为空');
       const msg = store.addMessage({ type: 'text', userId: user.id, name: user.name, text });
       io.emit('msg:new', msg);

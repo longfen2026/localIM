@@ -59,8 +59,8 @@ COPY --from=builder --chown=${PUID}:${PGID} /build/node_modules ./node_modules
 COPY --from=builder --chown=${PUID}:${PGID} /build/server ./server
 COPY --from=builder --chown=${PUID}:${PGID} /build/public ./public
 
-# 持久化目录：messages.jsonl / users.json / uploads / cookie 密钥
-RUN mkdir -p /app/data/uploads && chown -R ${PUID}:${PGID} /app/data
+# 持久化目录：messages.jsonl / users.json / uploads / files / cookie 密钥
+RUN mkdir -p /app/data/uploads /app/data/files && chown -R ${PUID}:${PGID} /app/data
 VOLUME ["/app/data"]
 
 USER ${PUID}:${PGID}

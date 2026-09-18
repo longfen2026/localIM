@@ -11,9 +11,17 @@ module.exports = {
   // 所有需要持久化的数据都放在这里，Docker 中通过 -v 映射到宿主机
   DATA_DIR,
   UPLOAD_DIR: path.join(DATA_DIR, 'uploads'),
+  // 聊天文件（非图片）暂存目录：24 小时过期，由 GC 定时清理
+  FILE_DIR: path.join(DATA_DIR, 'files'),
 
   // 单张图片大小上限（MB）
   MAX_UPLOAD_MB: Number(process.env.MAX_UPLOAD_MB || 10),
+  // 单个文件大小上限（MB），0 表示不限（仍受磁盘限制）
+  MAX_FILE_MB: Number(process.env.MAX_FILE_MB || 200),
+  // 文件有效期（小时），从上传时刻起算，过期后下载返回 410 并被清理
+  FILE_TTL_HOURS: Number(process.env.FILE_TTL_HOURS || 24),
+  // 过期文件清理的扫描间隔（分钟）
+  FILE_GC_MINUTES: Number(process.env.FILE_GC_MINUTES || 10),
   // 每次下发的历史消息条数
   HISTORY_PAGE: Number(process.env.HISTORY_PAGE || 50),
   // 历史消息 HTTP 接口一次最多返回多少条

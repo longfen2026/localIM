@@ -1,6 +1,6 @@
 # localIM · 局域网聊天室
 
-局域网内开箱即用的聊天室：**免密登录（只填主机名）**、**文字 + 图片**、**消息长期保存在服务端**、**Docker 部署 + 数据卷持久化**。
+局域网内开箱即用的聊天室：**免密登录（只填主机名）**、**文字 + 图片 + 文件**、**消息长期保存在服务端**、**Docker 部署 + 数据卷持久化**。
 
 ## 特性
 
@@ -11,6 +11,7 @@
 | 自动登录 | 签名 Cookie 记录身份，关掉浏览器下次打开直接进 |
 | 文字聊天 | Enter 发送 / Shift+Enter 换行，链接自动可点 |
 | 图片收发 | 点击按钮选择、Ctrl+V 粘贴、直接拖拽到窗口三种方式 |
+| 文件发送 | 📎 按钮发送任意类型文件（也可粘贴/拖拽）；服务端暂存 **24 小时**，过期自动清理，过期后聊天里的卡片会显示"已过期" |
 | 历史消息 | 服务端长期保存，进入即看最近 50 条，向上滚动加载更早 |
 | 在线状态 | 右上角查看在线成员与人数，进出有系统提示 |
 | 持久化 | 消息、用户、图片、Cookie 密钥全部写入数据目录，容器重建不丢 |
@@ -83,8 +84,8 @@ npm start
 ```
 localIM/
 ├── server/
-│   ├── index.js      # Express + Socket.IO：登录、上传、实时推送
-│   ├── store.js      # 持久化层（messages.jsonl / users.json）
+│   ├── index.js      # Express + Socket.IO：登录、上传、文件下载、实时推送
+│   ├── store.js      # 持久化层（messages.jsonl / users.json / files.json）+ 过期文件清理
 │   ├── media.js      # 读取图片真实宽高、MIME 白名单
 │   └── config.js     # 端口、目录、体积上限等配置
 ├── public/
@@ -97,8 +98,10 @@ localIM/
 └── data/             # 运行时生成，Docker 中映射到宿主机
     ├── messages.jsonl
     ├── users.json
+    ├── files.json
     ├── .cookie-secret
-    └── uploads/YYYYMM/
+    ├── uploads/YYYYMM/   # 聊天图片（长期保存）
+    └── files/YYYYMM/     # 聊天文件（24 小时过期）
 ```
 
 ## 持久化说明
@@ -107,10 +110,23 @@ localIM/
 | --- | --- |
 | `data/messages.jsonl` | 每行一条消息的追加日志，启动时全量载入内存 |
 | `data/users.json` | 用户 ID → 名字、最后活跃时间 |
-| `data/uploads/YYYYMM/` | 聊天图片原文件 |
+| `data/files.json` | 已发送文件的注册表（fileId → 文件名、过期时间等），供下载接口定位 |
+| `data/uploads/YYYYMM/` | 聊天图片原文件（长期保存） |
+| `data/files/YYYYMM/` | 聊天文件（文件名编码过期时间，24 小时后由服务端自动清理） |
 | `data/.cookie-secret` | Cookie 签名密钥，保留它重启后仍保持登录态 |
 
 备份整个 `data` 目录即可迁移聊天记录。
+
+## 文件发送与过期清理
+
+- 聊天中的**图片长期保存**；其他类型文件（压缩包、文档、视频等）**服务端暂存 24 小时**。
+- 有效期从**上传时刻**起算，过期时间同时写进落盘文件名（`${fileId}-${expiresAt}${ext}`）与消息数据（`file.expiresAt`），前端据此把过期文件渲染为"已过期"卡片。
+- 服务端每隔一段时间（默认 10 分钟）扫描清理：
+  1. 按文件名里的过期时间删除 `files/` 下已过期文件（权威依据，注册表丢失也不影响清理）；
+  2. 同步移除 `files.json` 注册表中过期条目；
+  3. 上传后超过 30 分钟仍未发送的孤儿文件一并删除。
+- 下载接口 `GET /api/files/:fileId` 对过期/已清理的文件返回 `410 Gone` / `404`，前端对应显示"文件已过期"。
+- 下载响应强制 `Content-Disposition: attachment` + `X-Content-Type-Options: nosniff`，任意类型的文件都只会被保存而不会被浏览器渲染，避免 HTML/SVG 类文件的脚本注入。
 
 ## 环境变量
 
@@ -120,6 +136,9 @@ localIM/
 | `HOST` | `0.0.0.0` | 监听地址 |
 | `DATA_DIR` | `<项目>/data` | 数据目录，Docker 内为 `/app/data` |
 | `MAX_UPLOAD_MB` | `10` | 单张图片大小上限（MB） |
+| `MAX_FILE_MB` | `200` | 单个文件大小上限（MB），`0` 表示不限 |
+| `FILE_TTL_HOURS` | `24` | 发送的文件有效期（小时），过期后下载失效并被清理 |
+| `FILE_GC_MINUTES` | `10` | 过期文件清理的扫描间隔（分钟） |
 | `HISTORY_PAGE` | `50` | 进入聊天室时下发的历史条数 |
 | `NAME_PREFIX` | `ID` | 自动派生名字的前缀，改成 `PC` 就是 `PC102` |
 | `TRUST_PROXY` | `loopback,linklocal,uniquelocal` | 信任哪些上游代理的 `X-Forwarded-For`。默认只信任本机和内网代理，避免伪造 IP 冒用身份；若前面是**公网**反向代理，设为 `true` |
@@ -130,11 +149,12 @@ localIM/
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/health` | 健康检查 |
-| GET | `/api/me` | 当前登录用户；未登录时一并返回 `ip` 与 `suggestedName`（按 IP 派生好的名字） |
+| GET | `/api/me` | 当前登录用户；未登录时一并返回 `ip`、`suggestedName`（按 IP 派生好的名字）与 `limits`（上传上限） |
 | POST | `/api/login` | `{name}` 登录或改名；`name` 留空则按 IP 自动派生 |
 | POST | `/api/logout` | 清除 Cookie |
 | GET | `/api/messages?limit=&before=` | 历史消息 |
-| POST | `/api/upload` | `multipart` 上传图片，返回 `fileId` |
+| POST | `/api/upload` | `multipart` 上传：字段 `image`（图片，长期保存）或 `file`（任意文件，24 小时过期），返回 `fileId` |
+| GET | `/api/files/:fileId` | 下载文件；过期或已被清理返回 `410`/`404` |
 
 WebSocket 事件：`init` / `msg:new` / `sys` / `presence` / `history:load` / `msg:send`。
 
@@ -197,9 +217,9 @@ dive localim:1.0.0                    # 交互式查看（需装 dive）
 npm test
 ```
 
-会拉起一个临时实例，用 `X-Forwarded-For` 模拟不同内网 IP，覆盖：按 IP 自动命名、空名字登录、同主机号冲突加序号、手动名字不被覆盖、Cookie 自动登录、文字与图片收发、类型白名单、历史分页、落盘与重连恢复，共 24 项检查。
+会拉起临时实例（另起一个短 TTL 实例验证文件过期清理），用 `X-Forwarded-For` 模拟不同内网 IP，覆盖：按 IP 自动命名、空名字登录、同主机号冲突加序号、手动名字不被覆盖、Cookie 自动登录、文字与图片收发、类型白名单、文件上传/发送/下载、大小上限、文件 24 小时过期与服务端自动清理、历史分页、落盘与重连恢复，共 39 项检查。
 
 ## 说明
 
 - 设计用于**可信局域网**，未做鉴权与端到端加密，请勿直接暴露到公网。
-- 已做的基础防护：昵称/文本长度限制、纯文本渲染（不解析 HTML）、图片 MIME 白名单、体积上限、发送与上传频率限制。
+- 已做的基础防护：昵称/文本长度限制、纯文本渲染（不解析 HTML）、图片 MIME 白名单、文件下载强制附件（nosniff，防 HTML/SVG 脚本注入）、体积上限、发送与上传频率限制。

@@ -65,7 +65,7 @@ const PNG = Buffer.from(
 
 (async () => {
   const child = spawn(process.execPath, [path.join(__dirname, '..', 'server', 'index.js')], {
-    env: Object.assign({}, process.env, { PORT: String(PORT), DATA_DIR, MAX_UPLOAD_MB: '2' }),
+    env: Object.assign({}, process.env, { PORT: String(PORT), DATA_DIR, MAX_UPLOAD_MB: '2', MAX_FILE_MB: '2' }),
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   child.stderr.on('data', (d) => process.stderr.write('[server] ' + d));
@@ -145,6 +145,141 @@ const PNG = Buffer.from(
     body: (() => { const f = new FormData(); f.append('image', new Blob(['<svg/>'], { type: 'image/svg+xml' }), 'x.svg'); return f; })(),
   });
   check('拒绝非白名单图片类型', badType.status === 415, `status=${badType.status}`);
+
+  /* ---------- 文件发送 ---------- */
+
+  // limits 下发
+  r = await req('/api/me');
+  check('/api/me 下发上传上限', r.body.limits && r.body.limits.maxImageMB === 2 && r.body.limits.maxFileMB === 2 && r.body.limits.fileTtlHours === 24,
+    JSON.stringify(r.body.limits));
+
+  // 上传文本文件
+  const fileContent = '本地文件内容 localIM file upload';
+  const fdF = new FormData();
+  fdF.append('file', new Blob([fileContent], { type: 'text/plain' }), '说明 文档.txt');
+  const upF = await fetch(BASE + '/api/upload', {
+    method: 'POST',
+    headers: Object.assign({}, extraHeaders, { Cookie: cookie }),
+    body: fdF,
+  });
+  const upFBody = await upF.json();
+  check('文件上传成功', upF.status === 200 && !!upFBody.fileId && upFBody.kind === 'file', `status=${upF.status}`);
+
+  // 落盘到 files/ 目录，且文件名带过期时间戳
+  const fileNamesBefore = fs.readdirSync(path.join(DATA_DIR, 'files'), { recursive: true })
+    .filter((f) => String(f).endsWith('.txt'));
+  check('文件已落盘到 files/（文件名编码过期时间）',
+    fileNamesBefore.length === 1 && /-[0-9]{10,}\.txt$/.test(fileNamesBefore[0]),
+    fileNamesBefore.join(','));
+
+  // 通过 WebSocket 发送文件消息
+  const fileSent = await new Promise((resolve) => sock.emit('msg:send', { fileId: upFBody.fileId, kind: 'file', text: '见附件' }, resolve));
+  check('发送文件消息', !!fileSent.ok && fileSent.message.type === 'file',
+    fileSent.ok ? '' : fileSent.error);
+  check('文件消息记录了文件名/大小/过期时间',
+    fileSent.message.file && fileSent.message.file.name === '说明 文档.txt' &&
+    fileSent.message.file.size === Buffer.byteLength(fileContent) &&
+    fileSent.message.file.expiresAt > Date.now());
+
+  // 下载内容一致，响应头为附件
+  const dl = await fetch(BASE + '/api/files/' + upFBody.fileId, { headers: extraHeaders });
+  const dlText = await dl.text();
+  check('按 fileId 下载文件内容一致', dl.status === 200 && dlText === fileContent, `status=${dl.status}`);
+  check('下载响应为附件且带 nosniff',
+    /attachment/i.test(dl.headers.get('content-disposition') || '') && dl.headers.get('x-content-type-options') === 'nosniff');
+
+  // 不存在的 fileId → 404
+  const dl404 = await fetch(BASE + '/api/files/000000000000000000000000', { headers: extraHeaders });
+  check('不存在的 fileId 下载返回 404', dl404.status === 404, `status=${dl404.status}`);
+
+  // 同一个 fileId 不能发送两次（发送后从 pending 移除）
+  const fdF2 = new FormData();
+  fdF2.append('file', new Blob([fileContent], { type: 'text/plain' }), '重复.txt');
+  const upF2 = await fetch(BASE + '/api/upload', {
+    method: 'POST',
+    headers: Object.assign({}, extraHeaders, { Cookie: cookie }),
+    body: fdF2,
+  });
+  const upF2Body = await upF2.json();
+  const dupSend = await new Promise((resolve) => sock.emit('msg:send', { fileId: upF2Body.fileId, kind: 'file' }, resolve));
+  const dupSend2 = await new Promise((resolve) => sock.emit('msg:send', { fileId: upF2Body.fileId, kind: 'file' }, resolve));
+  check('同一个 fileId 不能发送两次', !!dupSend.ok && !!dupSend2.error, dupSend2.error);
+
+  // 超过 MAX_FILE_MB 的文件拒绝（实例上限 2MB）
+  const fdBig = new FormData();
+  fdBig.append('file', new Blob([Buffer.alloc(2 * 1024 * 1024 + 1)], { type: 'application/octet-stream' }), 'big.bin');
+  const upBig = await fetch(BASE + '/api/upload', {
+    method: 'POST',
+    headers: Object.assign({}, extraHeaders, { Cookie: cookie }),
+    body: fdBig,
+  });
+  check('超过大小上限的文件拒绝', upBig.status === 413, `status=${upBig.status}`);
+
+  /* ---------- 文件过期与清理（独立实例：TTL≈1秒，GC 间隔≈1.2秒） ---------- */
+
+  const PORT2 = PORT + 1;
+  const DATA2 = fs.mkdtempSync(path.join(os.tmpdir(), 'localim-smoke-files-'));
+  const child2 = spawn(process.execPath, [path.join(__dirname, '..', 'server', 'index.js')], {
+    env: Object.assign({}, process.env, {
+      PORT: String(PORT2), DATA_DIR: DATA2,
+      FILE_TTL_HOURS: '0.0003',   // ≈ 1 秒
+      FILE_GC_MINUTES: '0.02',    // ≈ 1.2 秒
+    }),
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const cleanup2 = () => { try { child2.kill(); } catch (_) {} };
+  process.on('exit', cleanup2);
+
+  const BASE2 = `http://127.0.0.1:${PORT2}`;
+  const savedCookie = cookie;
+  cookie = '';
+  let ready2 = false;
+  for (let i = 0; i < 50; i++) {
+    try {
+      const rr = await fetch(BASE2 + '/api/health');
+      if (rr.status === 200) { ready2 = true; break; }
+    } catch (_) { /* 继续等 */ }
+    await new Promise((r2) => setTimeout(r2, 200));
+  }
+  if (!ready2) { console.error('过期测试实例未能启动'); cleanup2(); process.exit(1); }
+
+  // 在短 TTL 实例上登录并上传
+  const rl = await fetch(BASE2 + '/api/login', {
+    method: 'POST',
+    headers: Object.assign({}, extraHeaders, { 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ name: '过期测试员' }),
+  });
+  cookie = (rl.headers.getSetCookie ? rl.headers.getSetCookie() : []).map((c) => c.split(';')[0]).join('; ');
+
+  const fdE = new FormData();
+  fdE.append('file', new Blob(['expires soon'], { type: 'text/plain' }), 'short.txt');
+  const upE = await fetch(BASE2 + '/api/upload', {
+    method: 'POST',
+    headers: Object.assign({}, extraHeaders, { Cookie: cookie }),
+    body: fdE,
+  });
+  const upEBody = await upE.json();
+  check('短 TTL 实例上传成功', upE.status === 200 && !!upEBody.fileId, `status=${upE.status}`);
+
+  // 过期前可下载
+  const dlNow = await fetch(BASE2 + '/api/files/' + upEBody.fileId, { headers: extraHeaders });
+  check('过期前可下载', dlNow.status === 200, `status=${dlNow.status}`);
+
+  // 等待 TTL（≈1s）+ GC 扫描（≈1.2s）过去，文件过期并被清理
+  await new Promise((r2) => setTimeout(r2, 4000));
+  const dlAfter = await fetch(BASE2 + '/api/files/' + upEBody.fileId, { headers: extraHeaders });
+  check('过期后下载返回 410/404', dlAfter.status === 410 || dlAfter.status === 404, `status=${dlAfter.status}`);
+
+  const leftFiles = fs.readdirSync(path.join(DATA2, 'files'), { recursive: true })
+    .filter((f) => String(f).endsWith('.txt'));
+  check('过期文件已被服务端清理', leftFiles.length === 0, leftFiles.join(','));
+  let filesJson = {};
+  try { filesJson = JSON.parse(fs.readFileSync(path.join(DATA2, 'files.json'), 'utf8')); } catch (_) {}
+  check('注册表中过期条目已移除', Object.keys(filesJson).length === 0, JSON.stringify(Object.keys(filesJson)));
+
+  cleanup2();
+  fs.rmSync(DATA2, { recursive: true, force: true });
+  cookie = savedCookie;
 
   /* ---------- 历史与持久化 ---------- */
 
