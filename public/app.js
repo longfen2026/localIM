@@ -409,8 +409,10 @@
     uploadImage(file, (percent) => {
       const p = state.pending.get(localId);
       if (p) p.row.style.opacity = String(0.4 + 0.6 * (percent / 100));
-    }).then((fileId) => {
-      doSend({ fileId, kind: 'image' }, localId, blobUrl);
+    }).then((data) => {
+      // uploadFormData 兑现的是整个上传响应，必须取 data.fileId（曾经直接当 fileId 用，
+      // 传给服务端的就成了对象，被 String() 成 "[object Object]" → 误报"图片已失效"）
+      doSend({ fileId: data.fileId, kind: 'image' }, localId, blobUrl);
     }).catch((err) => {
       const p = state.pending.get(localId);
       if (p) { p.row.classList.add('failed'); p.row.style.opacity = '1'; }

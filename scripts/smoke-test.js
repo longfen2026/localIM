@@ -167,6 +167,10 @@ const PNG = Buffer.from(
   check('发送图片消息', !!imgSent.ok && imgSent.message.type === 'image');
   check('图片记录了宽高', imgSent.message.image && imgSent.message.image.w === 1 && imgSent.message.image.h === 1);
 
+  // 回归：fileId 传成对象（前端曾误把整个上传响应当 fileId）时不能报"已失效"，应给出明确参数错误
+  const badFileId = await waitAck(sock, 'msg:send', { fileId: { fileId: upBody.fileId, kind: 'image' }, kind: 'image' });
+  check('fileId 非字符串返回明确的参数错误', !!badFileId.error && badFileId.error.includes('参数'), badFileId.error || '（没有报错）');
+
   const badType = await fetch(BASE + '/api/upload', {
     method: 'POST',
     headers: Object.assign({}, extraHeaders, { Cookie: cookie }),

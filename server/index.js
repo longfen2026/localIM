@@ -449,9 +449,14 @@ async function main() {
 
       const p = payload || {};
       const text = cleanText(p.text).trim();
+      // fileId 必须是非空字符串：客户端若把整个上传响应对象当 fileId 传过来，
+      // String() 会得到 "[object Object]"，只会报出容易误判的"已失效"
+      const fileId = typeof p.fileId === 'string' ? p.fileId.trim() : '';
+      if (p.fileId && !fileId) return done('参数错误：fileId 无效');
+
       // 图片消息
-      if (p.fileId && p.kind !== 'file') {
-        const info = store.takePendingUpload(String(p.fileId), user.id);
+      if (fileId && p.kind !== 'file') {
+        const info = store.takePendingUpload(fileId, user.id);
         if (!info) return done('图片已失效，请重新上传');
         const msg = store.addMessage({
           type: 'image',
@@ -465,8 +470,8 @@ async function main() {
       }
 
       // 文件消息（非图片）：暂存到过期为止
-      if (p.fileId && p.kind === 'file') {
-        const info = store.takePendingFile(String(p.fileId), user.id);
+      if (fileId && p.kind === 'file') {
+        const info = store.takePendingFile(fileId, user.id);
         if (!info) return done('文件已失效，请重新上传');
         const msg = store.addMessage({
           type: 'file',
@@ -474,7 +479,7 @@ async function main() {
           name: user.name,
           text,
           file: {
-            id: String(p.fileId),
+            id: fileId,
             name: info.name,
             mime: info.mime,
             size: info.size,
