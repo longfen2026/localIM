@@ -114,6 +114,11 @@ class Store {
 
   /* ---------------- 消息 ---------------- */
 
+  /**
+   * 载入消息日志。被删除的消息以"墓碑行"记录：
+   *   { id, ts, type: 'msg:deleted', delId: <被删消息的 id> }
+   * 墓碑自身占用 id 序列（保证重启后新消息不复用已删除的 id），加载时按墓碑过滤。
+   */
   async _loadMessages() {
     const file = path.join(this.dir, MESSAGES_FILE);
     let raw = '';
@@ -124,22 +129,30 @@ class Store {
       return;
     }
     const list = [];
+    const deletedIds = new Set();
+    let maxId = 0;
     for (const line of raw.split('\n')) {
       const t = line.trim();
       if (!t) continue;
       try {
         const m = JSON.parse(t);
-        if (m && typeof m.id === 'number') list.push(m);
+        if (!m || typeof m.id !== 'number') continue;
+        if (m.id > maxId) maxId = m.id;
+        if (m.type === 'msg:deleted' && typeof m.delId === 'number') {
+          deletedIds.add(m.delId);
+        } else {
+          list.push(m);
+        }
       } catch (_) { /* 跳过损坏行，不阻塞启动 */ }
     }
     list.sort((a, b) => a.id - b.id);
-    this.messages = list;
-    this.seq = list.length ? list[list.length - 1].id : 0;
+    this.messages = list.filter((m) => !deletedIds.has(m.id));
+    this.seq = maxId;
   }
 
   /**
    * 追加一条消息并落盘。
-   * @param {{type:string,userId:string,name:string,text?:string,image?:object}} msg
+   * @param {{type:string,userId:string,name:string,text?:string,image?:object,file?:object}} msg
    */
   addMessage(msg) {
     const full = Object.assign({ id: ++this.seq, ts: Date.now() }, msg);
@@ -149,6 +162,34 @@ class Store {
       .then(() => fsp.appendFile(path.join(this.dir, MESSAGES_FILE), line, 'utf8'))
       .catch((e) => console.error('[store] 写入消息失败:', e.message));
     return full;
+  }
+
+  /** 按 id 查找消息（messages 按 id 升序，二分） */
+  getMessage(id) {
+    let lo = 0, hi = this.messages.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.messages[mid].id < id) lo = mid + 1;
+      else hi = mid;
+    }
+    const m = this.messages[lo];
+    return m && m.id === id ? m : null;
+  }
+
+  /**
+   * 删除一条消息：内存移除 + 追加墓碑行落盘（append-only，不重写文件）。
+   * 返回被删的消息，供调用方清理其引用的服务端文件；不存在返回 null。
+   */
+  deleteMessage(id) {
+    const idx = this.messages.findIndex((m) => m.id === id);
+    if (idx === -1) return null;
+    const [removed] = this.messages.splice(idx, 1);
+    const tomb = { id: ++this.seq, ts: Date.now(), type: 'msg:deleted', delId: removed.id };
+    const line = JSON.stringify(tomb) + '\n';
+    this._chain = this._chain
+      .then(() => fsp.appendFile(path.join(this.dir, MESSAGES_FILE), line, 'utf8'))
+      .catch((e) => console.error('[store] 写入删除记录失败:', e.message));
+    return removed;
   }
 
   /**
@@ -216,6 +257,15 @@ class Store {
 
   getFile(fileId) {
     return this.files[fileId] || null;
+  }
+
+  /** 从注册表移除文件条目并写盘，返回被移除的条目（供调用方删磁盘文件）；不存在返回 null */
+  removeFile(fileId) {
+    const entry = this.files[fileId];
+    if (!entry) return null;
+    delete this.files[fileId];
+    this._saveFiles();
+    return entry;
   }
 
   absFile(entry) {
@@ -318,8 +368,12 @@ class Store {
       for (const [id, info] of this.pendingUploads) {
         if (info.ts < deadline) {
           this.pendingUploads.delete(id);
-          const abs = path.join(this.uploadDir, path.basename(info.url.replace(/^\/uploads\//, '')));
-          fs.unlink(abs, () => {});
+          // url 形如 /uploads/YYYYMM/name.ext，保留月份子目录并防路径遍历
+          const rel = String(info.url || '').replace(/^\/uploads\//, '').split('/').join(path.sep);
+          const abs = path.resolve(this.uploadDir, rel);
+          if (abs.startsWith(path.resolve(this.uploadDir) + path.sep)) {
+            fs.unlink(abs, () => {});
+          }
         }
       }
     }, 10 * 60 * 1000);

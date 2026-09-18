@@ -53,7 +53,35 @@ function connect(opts = {}) {
     });
     sock.on('init', (data) => resolve({ sock, data }));
     sock.on('connect_error', (e) => reject(new Error('WS 连接失败: ' + e.message)));
+    // 非主动关闭的断线要打出来：reconnection 关闭后掉线会让后续 ack 永远等不到
+    sock.on('disconnect', (reason) => {
+      if (reason !== 'io client disconnect') console.log(`  [ws] 连接断开: ${reason}`);
+    });
     setTimeout(() => reject(new Error('WS 连接超时')), 5000);
+  });
+}
+
+/**
+ * 发送事件并等待服务端 ack。
+ * 超时（默认 5 秒）直接抛错并附上 socket 状态，避免丢 ack 时测试永久挂起。
+ */
+function waitAck(sock, event, payload, ms) {
+  const timeout = ms || 5000;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(
+        `${event} 未在 ${timeout}ms 内收到 ack（socket=${sock.connected ? '已连接' : '已断开'}, id=${sock.id || '-'}, payload=${JSON.stringify(payload)})`
+      ));
+    }, timeout);
+    sock.emit(event, payload, (res) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(res);
+    });
   });
 }
 
@@ -104,7 +132,7 @@ const PNG = Buffer.from(
   check('Socket 鉴权通过并收到 init', !!init.me && Array.isArray(init.messages));
   check('Socket 连接后自动名保持一致', init.me.name === 'ID102', init.me.name);
 
-  const sent = await new Promise((resolve) => sock.emit('msg:send', { text: '你好，局域网！' }, resolve));
+  const sent = await waitAck(sock, 'msg:send', { text: '你好，局域网！' });
   check('发送文字消息', !!sent.ok && sent.message.text === '你好，局域网！');
   check('消息记录的是自动派生名', sent.message.name === 'ID102', sent.message.name);
 
@@ -135,7 +163,7 @@ const PNG = Buffer.from(
   const upBody = await up.json();
   check('图片上传成功', up.status === 200 && !!upBody.fileId, `status=${up.status}`);
 
-  const imgSent = await new Promise((resolve) => sock.emit('msg:send', { fileId: upBody.fileId, text: '像素点' }, resolve));
+  const imgSent = await waitAck(sock, 'msg:send', { fileId: upBody.fileId, text: '像素点' });
   check('发送图片消息', !!imgSent.ok && imgSent.message.type === 'image');
   check('图片记录了宽高', imgSent.message.image && imgSent.message.image.w === 1 && imgSent.message.image.h === 1);
 
@@ -173,7 +201,7 @@ const PNG = Buffer.from(
     fileNamesBefore.join(','));
 
   // 通过 WebSocket 发送文件消息
-  const fileSent = await new Promise((resolve) => sock.emit('msg:send', { fileId: upFBody.fileId, kind: 'file', text: '见附件' }, resolve));
+  const fileSent = await waitAck(sock, 'msg:send', { fileId: upFBody.fileId, kind: 'file', text: '见附件' });
   check('发送文件消息', !!fileSent.ok && fileSent.message.type === 'file',
     fileSent.ok ? '' : fileSent.error);
   check('文件消息记录了文件名/大小/过期时间',
@@ -201,8 +229,8 @@ const PNG = Buffer.from(
     body: fdF2,
   });
   const upF2Body = await upF2.json();
-  const dupSend = await new Promise((resolve) => sock.emit('msg:send', { fileId: upF2Body.fileId, kind: 'file' }, resolve));
-  const dupSend2 = await new Promise((resolve) => sock.emit('msg:send', { fileId: upF2Body.fileId, kind: 'file' }, resolve));
+  const dupSend = await waitAck(sock, 'msg:send', { fileId: upF2Body.fileId, kind: 'file' });
+  const dupSend2 = await waitAck(sock, 'msg:send', { fileId: upF2Body.fileId, kind: 'file' });
   check('同一个 fileId 不能发送两次', !!dupSend.ok && !!dupSend2.error, dupSend2.error);
 
   // 超过 MAX_FILE_MB 的文件拒绝（实例上限 2MB）
@@ -281,9 +309,88 @@ const PNG = Buffer.from(
   fs.rmSync(DATA2, { recursive: true, force: true });
   cookie = savedCookie;
 
+  /* ---------- 删除自己发送的消息 ---------- */
+
+  // 发一条待删除的文字
+  const delMsg = await waitAck(sock, 'msg:send', { text: '这条要被删除' });
+  check('发送待删除消息', !!delMsg.ok && typeof delMsg.message.id === 'number');
+
+  // 参数 / 存在性校验
+  const delBad = await waitAck(sock, 'msg:delete', { id: 'abc' });
+  check('删除参数错误返回错误', !!delBad.error);
+  const del404 = await waitAck(sock, 'msg:delete', { id: 99999999 });
+  check('删除不存在的消息返回错误', !!del404.error);
+  const delTxt = await waitAck(sock, 'msg:delete', { id: delMsg.message.id });
+  check('删除自己的文字消息', !!delTxt.ok && delTxt.id === delMsg.message.id);
+  const delGone = await waitAck(sock, 'msg:delete', { id: delMsg.message.id });
+  check('重复删除同一条消息返回错误', !!delGone.error, delGone.error);
+
+  // 他人消息不可删：ID102-2 的用户删除 ID102 的图片消息
+  const sockB = await connect({ cookie: rB.cookie });
+  const delForeign = await waitAck(sockB.sock, 'msg:delete', { id: imgSent.message.id });
+  check('不能删除他人发送的消息', !!delForeign.error, delForeign.error);
+  sockB.sock.close();
+
+  // 删除图片消息 → 服务端图片文件被清理
+  const fdDel = new FormData();
+  fdDel.append('image', new Blob([PNG], { type: 'image/png' }), 'del.png');
+  const upDel = await fetch(BASE + '/api/upload', {
+    method: 'POST',
+    headers: Object.assign({}, extraHeaders, { Cookie: cookie }),
+    body: fdDel,
+  });
+  const upDelBody = await upDel.json();
+  const sentImgDel = await waitAck(sock, 'msg:send', { fileId: upDelBody.fileId });
+  const pngBefore = countUploadPng();
+  const delImg = await waitAck(sock, 'msg:delete', { id: sentImgDel.message.id });
+  await new Promise((r2) => setTimeout(r2, 400));
+  check('删除图片消息成功', !!delImg.ok, delImg.error || '');
+  check('删除图片消息清理服务端图片文件', countUploadPng() === pngBefore - 1, `${pngBefore} → ${countUploadPng()}`);
+
+  // 删除文件消息 → files 下文件被清理、注册表移除、下载 404
+  const fdDelF = new FormData();
+  fdDelF.append('file', new Blob(['delete me'], { type: 'text/plain' }), '删除我.txt');
+  const upDelF = await fetch(BASE + '/api/upload', {
+    method: 'POST',
+    headers: Object.assign({}, extraHeaders, { Cookie: cookie }),
+    body: fdDelF,
+  });
+  const upDelFBody = await upDelF.json();
+  const sentFileDel = await waitAck(sock, 'msg:send', { fileId: upDelFBody.fileId, kind: 'file' });
+  // files.json 为防抖写盘（500ms），等待写盘后再读
+  await new Promise((r2) => setTimeout(r2, 900));
+  const filesJsonDel = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'files.json'), 'utf8'));
+  check('文件消息发送后进入注册表', !!filesJsonDel[upDelFBody.fileId]);
+  const filesBeforeDel = countFilesOnDisk('.txt');
+  const delFile = await waitAck(sock, 'msg:delete', { id: sentFileDel.message.id });
+  await new Promise((r2) => setTimeout(r2, 900));
+  check('删除文件消息成功', !!delFile.ok, delFile.error || '');
+  check('删除文件消息清理服务端文件', countFilesOnDisk('.txt') === filesBeforeDel - 1, `${filesBeforeDel} → ${countFilesOnDisk('.txt')}`);
+  const filesJsonDel2 = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'files.json'), 'utf8'));
+  check('注册表中对应条目已移除', !filesJsonDel2[upDelFBody.fileId]);
+  const dlDeleted = await fetch(BASE + '/api/files/' + upDelFBody.fileId, { headers: extraHeaders });
+  check('已删除文件的下载返回 404', dlDeleted.status === 404, `status=${dlDeleted.status}`);
+
+  // 重连后历史不含已删除消息（墓碑持久化生效）
+  const delIds = [delMsg.message.id, sentImgDel.message.id, sentFileDel.message.id];
+  const { data: initDel, sock: sockDel } = await connect();
+  check('重连后历史不含已删除消息', initDel.messages.every((m) => !delIds.includes(m.id)),
+    initDel.messages.map((m) => m.id).join(','));
+  sockDel.close();
+
+  /** 统计 uploads/ 下指定扩展名文件数 */
+  function countUploadPng() {
+    return fs.readdirSync(path.join(DATA_DIR, 'uploads'), { recursive: true }).filter((f) => String(f).endsWith('.png')).length;
+  }
+
+  /** 统计 files/ 下指定扩展名文件数 */
+  function countFilesOnDisk(ext) {
+    return fs.readdirSync(path.join(DATA_DIR, 'files'), { recursive: true }).filter((f) => String(f).endsWith(ext)).length;
+  }
+
   /* ---------- 历史与持久化 ---------- */
 
-  const hist = await new Promise((resolve) => sock.emit('history:load', { before: init.messages.length ? init.messages[0].id : 1, limit: 10 }, resolve));
+  const hist = await waitAck(sock, 'history:load', { before: init.messages.length ? init.messages[0].id : 1, limit: 10 });
   check('历史分页接口可用', !!hist.ok && Array.isArray(hist.messages));
 
   sock.close();

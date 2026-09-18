@@ -192,9 +192,32 @@
       linkify(bubble, msg.text || '');
     }
 
+    // 自己已发送的消息（真实 id）可删除
+    if (isMe && typeof msg.id === 'number') bubble.appendChild(buildDeleteBtn(msg.id));
+
     body.appendChild(bubble);
     row.appendChild(body);
     return row;
+  }
+
+  /** 删除按钮：hover 气泡右上角出现，确认后删除 */
+  function buildDeleteBtn(msgId) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'msg-del';
+    b.title = '删除这条消息';
+    b.setAttribute('aria-label', '删除这条消息');
+    b.textContent = '×';
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (!window.confirm('删除这条消息？删除后不可恢复。')) return;
+      if (!socket || !socket.connected) { toast('连接已断开，正在重连…'); return; }
+      socket.emit('msg:delete', { id: msgId }, (res) => {
+        if (!res || res.error) toast((res && res.error) || '删除失败');
+        // 成功时由服务端广播 msg:deleted 统一移除（包括自己）
+      });
+    });
+    return b;
   }
 
   /** 文件消息卡片：图标 + 文件名 + 大小 + 下载；过期则置灰并提示 */
@@ -279,6 +302,24 @@
     if (!prev || dayKey(prev.ts) !== dk) el.msgList.appendChild(daySepEl(msg.ts));
     el.msgList.appendChild(makeRow(msg, prev));
     return true;
+  }
+
+  /** 移除一条已渲染的消息（服务端广播删除后调用），保持视觉滚动位置 */
+  function removeMessage(id) {
+    if (!state.ids.has(id)) return;
+    state.ids.delete(id);
+    const row = el.msgList.querySelector('.row[data-id="' + id + '"]');
+    const h = row ? row.offsetHeight : 0;
+    const wasBottom = nearBottom();
+    state.msgs = state.msgs.filter((m) => m.id !== id);
+    renderList();
+    if (!wasBottom && h) {
+      // 被删消息在视口上方时内容整体上移，补偿高度差避免视觉跳动
+      const prevBehavior = el.msgs.style.scrollBehavior;
+      el.msgs.style.scrollBehavior = 'auto';
+      el.msgs.scrollTop = Math.max(0, el.msgs.scrollTop - h);
+      el.msgs.style.scrollBehavior = prevBehavior;
+    }
   }
 
   function prependMessages(list) {
@@ -530,6 +571,12 @@
       if (!added) return;
       if (nearBottom()) scrollToBottom(false);
       else if (msg.userId !== (state.me && state.me.id)) bumpUnread();
+    });
+
+    // 服务端已删除该消息（含发起者本人），全员移除
+    socket.on('msg:deleted', (data) => {
+      const id = Number(data && data.id);
+      if (Number.isInteger(id)) removeMessage(id);
     });
 
     socket.on('sys', (data) => sysRow(data.text, data.ts));

@@ -379,6 +379,29 @@ async function main() {
     return [...map.entries()].map(([id, name]) => ({ id, name }));
   }
 
+  /**
+   * 删除消息时清理其引用的服务端文件：
+   * - 图片消息：删除 uploads/ 下的原文件；
+   * - 文件消息：删除 files/ 下的文件并从注册表（files.json）移除条目。
+   */
+  async function cleanupMessageFiles(msg) {
+    try {
+      if (msg.type === 'image' && msg.image && msg.image.url) {
+        // url 形如 /uploads/YYYYMM/name.ext；保留月份子目录，并防路径遍历
+        const rel = String(msg.image.url).replace(/^\/uploads\//, '').split('/').join(path.sep);
+        const abs = path.resolve(config.UPLOAD_DIR, rel);
+        if (abs.startsWith(path.resolve(config.UPLOAD_DIR) + path.sep)) {
+          await fsp.unlink(abs).catch(() => {});
+        }
+      } else if (msg.type === 'file' && msg.file && msg.file.id) {
+        const entry = store.removeFile(String(msg.file.id));
+        if (entry) await fsp.unlink(store.absFile(entry)).catch(() => {});
+      }
+    } catch (e) {
+      console.error('[msg] 清理消息文件失败:', e && e.message);
+    }
+  }
+
   function broadcastPresence() {
     io.emit('presence', { online: presenceList() });
   }
@@ -467,6 +490,21 @@ async function main() {
       const msg = store.addMessage({ type: 'text', userId: user.id, name: user.name, text });
       io.emit('msg:new', msg);
       done(null, msg);
+    });
+
+    // 删除自己发送的消息：图片/文件消息会连带清理服务端文件
+    socket.on('msg:delete', (payload, ack) => {
+      const done = (err, data) => { if (typeof ack === 'function') ack(err ? { error: err } : Object.assign({ ok: true }, data)); };
+      const id = Number(payload && payload.id);
+      if (!Number.isInteger(id)) return done('参数错误');
+      if (!allowMessage(user.id)) return done('操作过于频繁，请稍后再试');
+      const msg = store.getMessage(id);
+      if (!msg) return done('消息不存在或已被删除');
+      if (msg.userId !== user.id) return done('只能删除自己发送的消息');
+      const removed = store.deleteMessage(id);
+      if (removed) cleanupMessageFiles(removed); // 异步清理，不阻塞 ack
+      io.emit('msg:deleted', { id });
+      done(null, { id });
     });
 
     socket.on('disconnect', () => {

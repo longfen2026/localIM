@@ -310,6 +310,7 @@ button { font-family: inherit; cursor: pointer; }
 
 .bubble {
   display: inline-block;
+  position: relative;
   padding: 8px 12px;
   border-radius: 12px;
   background: var(--bubble);
@@ -401,6 +402,38 @@ button { font-family: inherit; cursor: pointer; }
 .row.me .fc-dl:hover { background: #fff; color: var(--brand); }
 .file-card.expired { opacity: .55; }
 .file-card.expired .fc-badge { color: var(--text-3); background: var(--border); }
+
+/* 删除自己消息的按钮：桌面 hover 显示，触摸设备常显 */
+.msg-del {
+  position: absolute;
+  top: -9px;
+  right: -9px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity .15s, background .15s, color .15s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2;
+}
+.row:hover .msg-del { opacity: 1; }
+.msg-del:hover {
+  background: #e5484d;
+  border-color: #e5484d;
+  color: #fff;
+}
+@media (hover: none) {
+  .msg-del { opacity: .55; }
+}
 
 .pending { opacity: .55; }
 .failed .bubble { border-color: #e5484d; }
